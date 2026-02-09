@@ -98,7 +98,7 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
 
         // 2) Scroll — trigger whileInView / IntersectionObserver animations
         setPhase(1, 0);
-        const scrollStep = 400;
+        const scrollStep = 750;
         await page.evaluate(async (step) => {
             const waitForStability = () =>
                 new Promise((resolve) => {
