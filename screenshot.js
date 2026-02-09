@@ -184,6 +184,7 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
     slots._printed = false;
     const progress = { done: 0, total, slots };
 
+    const startTime = Date.now();
     console.log(`🚀 Taking screenshots of ${total} URL(s) (max ${workerCount} parallel)…\n`);
     // Reserve lines for the progress bar
     process.stderr.write("\n".repeat(workerCount));
@@ -209,5 +210,6 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
         await browser.close();
     }
 
-    console.log(`\n🏁 Done — ${progress.done}/${total} screenshots.`);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`\n🏁 Done — ${progress.done}/${total} screenshots in ${elapsed}s.`);
 })();
