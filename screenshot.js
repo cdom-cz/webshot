@@ -15,8 +15,8 @@ const fs = require("fs/promises");
 
 const VIEWPORT_WIDTH = 1920;
 const JPG_QUALITY = 80;
-const OUTPUT_DIR = "screenshots"; // samostatný adresář pro výstupy
-const CONCURRENCY = 4; // max počet paralelních screenshotů
+const OUTPUT_DIR = "screenshots";
+const CONCURRENCY = 4; // max parallel screenshots
 
 function sanitizeHostToFilename(hostname) {
     // example.com -> example-com
@@ -27,6 +27,25 @@ function sanitizeHostToFilename(hostname) {
         .replace(/\./g, "-");
 }
 
+// Processing phases for the progress bar
+const PHASES = ["loading", "scroll", "screenshot", "converting"];
+
+function printProgress(slots) {
+    const lines = slots.map((s) => {
+        if (!s) return "";
+        const pct = Math.round((s.phase / PHASES.length) * 100);
+        const filled = Math.round(pct / 5);
+        const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+        return `  ${s.host.padEnd(30)} ${bar} ${pct}% ${PHASES[s.phase - 1] || ""}`;
+    });
+    // Move cursor up and overwrite
+    if (slots._printed) {
+        process.stderr.write(`\x1b[${slots.length}A`);
+    }
+    process.stderr.write(lines.join("\n") + "\n");
+    slots._printed = true;
+}
+
 function ensureUrl(input) {
     try {
         return new URL(input);
@@ -35,10 +54,15 @@ function ensureUrl(input) {
     }
 }
 
-async function takeScreenshot(browser, url, outputDir, progress) {
+async function takeScreenshot(browser, url, outputDir, progress, slot) {
     const fileBase = sanitizeHostToFilename(url.hostname);
     const outputFile = path.join(outputDir, `${fileBase}.jpg`);
     const host = url.hostname;
+
+    slot.host = host;
+    slot.phase = 0;
+
+    const advance = () => { slot.phase++; printProgress(progress.slots); };
 
     const page = await browser.newPage({
         viewport: { width: VIEWPORT_WIDTH, height: 800 },
@@ -46,19 +70,17 @@ async function takeScreenshot(browser, url, outputDir, progress) {
     });
 
     try {
-        console.log(`⏳ ${host} — načítám…`);
-
-        // Framer Motion respektuje prefers-reduced-motion — animace přeskočí na finální stav
+        // 1) Loading page
+        advance();
         await page.emulateMedia({ reducedMotion: "reduce" });
-
         await page.goto(url.toString(), {
             waitUntil: "networkidle",
             timeout: 45000,
         });
 
-        // Pomalu proscrollujeme celou stránku, aby se spustily whileInView animace
-        // Po každém kroku čekáme na ustálení DOM (Framer píše inline style každý rAF)
-        const scrollStep = 400; // menší kroky = víc prvků se triggerne
+        // 2) Scroll — trigger whileInView / IntersectionObserver animations
+        advance();
+        const scrollStep = 400;
         await page.evaluate(async (step) => {
             const waitForStability = () =>
                 new Promise((resolve) => {
@@ -80,29 +102,35 @@ async function takeScreenshot(browser, url, outputDir, progress) {
                 window.scrollTo(0, y);
                 await waitForStability();
             }
-            // Scroll na úplný konec
             window.scrollTo(0, document.body.scrollHeight);
             await waitForStability();
-
-            // Zpět nahoru a počkat na finální ustálení
             window.scrollTo(0, 0);
             await waitForStability();
         }, scrollStep);
 
+        // 3) Screenshot
+        advance();
         const pngBuffer = await page.screenshot({
             type: "png",
             fullPage: true,
         });
 
+        // 4) Convert PNG -> JPEG
+        advance();
         await sharp(pngBuffer)
             .jpeg({ quality: JPG_QUALITY, mozjpeg: true })
             .toFile(outputFile);
 
         progress.done++;
-        console.log(`✅ [${progress.done}/${progress.total}] ${host} -> ${outputFile}`);
+        slot.host = `✅ ${host}`;
+        slot.phase = PHASES.length;
+        printProgress(progress.slots);
     } catch (err) {
         progress.done++;
-        console.error(`❌ [${progress.done}/${progress.total}] ${host} — ${err.message}`);
+        slot.host = `❌ ${host}`;
+        slot.phase = PHASES.length;
+        printProgress(progress.slots);
+        console.error(`   ${host}: ${err.message}`);
         process.exitCode = 1;
     } finally {
         await page.close();
@@ -112,15 +140,25 @@ async function takeScreenshot(browser, url, outputDir, progress) {
 (async () => {
     const rawArgs = process.argv.slice(2);
     if (rawArgs.length === 0) {
-        console.error("Chyba: zadej URL, např. pnpm shot https://example.com/");
+        console.error("Error: provide a URL, e.g. pnpm shot https://example.com/");
         process.exit(1);
     }
 
     const urls = rawArgs.map(ensureUrl);
     const total = urls.length;
-    const progress = { done: 0, total };
+    const workerCount = Math.min(CONCURRENCY, total);
 
-    console.log(`🚀 Spouštím screenshot pro ${total} URL (paralelně max ${CONCURRENCY})…\n`);
+    // Progress bar slots — one line per worker
+    const slots = Array.from({ length: workerCount }, () => ({ host: "…", phase: 0 }));
+    slots._printed = false;
+    const progress = { done: 0, total, slots };
+
+    console.log(`🚀 Taking screenshots of ${total} URL(s) (max ${workerCount} parallel)…\n`);
+    // Reserve lines for the progress bar
+    process.stderr.write("\n".repeat(workerCount));
+    slots._printed = true;
+    process.stderr.write(`\x1b[${workerCount}A`);
+    printProgress(slots);
 
     const outputDir = path.resolve(process.cwd(), OUTPUT_DIR);
     await fs.mkdir(outputDir, { recursive: true });
@@ -128,12 +166,11 @@ async function takeScreenshot(browser, url, outputDir, progress) {
     const browser = await chromium.launch({ headless: true });
 
     try {
-        // Paralelní zpracování s omezenou concurrency
         const queue = [...urls];
-        const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, async () => {
+        const workers = Array.from({ length: workerCount }, async (_, i) => {
             while (queue.length > 0) {
                 const url = queue.shift();
-                await takeScreenshot(browser, url, outputDir, progress);
+                await takeScreenshot(browser, url, outputDir, progress, slots[i]);
             }
         });
         await Promise.all(workers);
@@ -141,5 +178,5 @@ async function takeScreenshot(browser, url, outputDir, progress) {
         await browser.close();
     }
 
-    console.log(`\n🏁 Hotovo — ${progress.done}/${total} screenshotů.`);
+    console.log(`\n🏁 Done — ${progress.done}/${total} screenshots.`);
 })();
