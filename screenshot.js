@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
  * Usage:
- *   pnpm shot https://image21.cdom.cz/
+ *   pnpm shot https://example.com/
  *   pnpm shot https://example.com https://example.org
  *
  * Output:
- *   ./screenshots/image21-cdom-cz.jpg
+ *   ./screenshots/example-com.jpg
  */
 
 const { chromium } = require("playwright");
@@ -18,7 +18,7 @@ const JPG_QUALITY = 80;
 const OUTPUT_DIR = "screenshots"; // samostatný adresář pro výstupy
 
 function sanitizeHostToFilename(hostname) {
-    // image21.cdom.cz -> image21-cdom-cz
+    // example.com -> example-com
     return hostname
         .toLowerCase()
         .replace(/^www\./, "")
@@ -49,6 +49,14 @@ async function takeScreenshot(browser, url, outputDir) {
             timeout: 45000,
         });
 
+        // Počkáme na dokončení JS animací (React hydration, Next.js transitions apod.)
+        await page.evaluate(() =>
+            new Promise((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(resolve));
+            })
+        );
+        await page.waitForTimeout(2000);
+
         const pngBuffer = await page.screenshot({
             type: "png",
             fullPage: true,
@@ -70,7 +78,7 @@ async function takeScreenshot(browser, url, outputDir) {
 (async () => {
     const rawArgs = process.argv.slice(2);
     if (rawArgs.length === 0) {
-        console.error("Chyba: zadej URL, např. pnpm shot https://image21.cdom.cz/");
+        console.error("Chyba: zadej URL, např. pnpm shot https://example.com/");
         process.exit(1);
     }
 
