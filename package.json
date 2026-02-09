@@ -1,0 +1,21 @@
+{
+  "name": "webshot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "shot": "node screenshot.js",
+    "postinstall": "playwright install --with-deps chromium"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "packageManager": "pnpm@10.25.0",
+  "dependencies": {
+    "playwright": "^1.58.2",
+    "sharp": "^0.34.5"
+  },
+  "volta": {
+    "node": "22.22.0"
+  }
+}
