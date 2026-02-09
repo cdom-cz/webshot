@@ -27,16 +27,22 @@ function sanitizeHostToFilename(hostname) {
         .replace(/\./g, "-");
 }
 
-// Processing phases for the progress bar
-const PHASES = ["loading", "scroll", "screenshot", "converting"];
+// Phase weights for smooth progress (loading=20%, scroll=50%, screenshot=15%, converting=15%)
+const PHASES = [
+    { label: "loading",    start: 0,   end: 20  },
+    { label: "scroll",     start: 20,  end: 70  },
+    { label: "screenshot", start: 70,  end: 85  },
+    { label: "converting", start: 85,  end: 100 },
+];
 
 function printProgress(slots) {
     const lines = slots.map((s) => {
         if (!s) return "";
-        const pct = Math.round((s.phase / PHASES.length) * 100);
+        const pct = Math.round(s.pct);
         const filled = Math.round(pct / 5);
         const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-        return `  ${s.host.padEnd(30)} ${bar} ${pct}% ${PHASES[s.phase - 1] || ""}`;
+        const label = s.label || "";
+        return `  ${s.host.padEnd(30)} ${bar} ${String(pct).padStart(3)}% ${label}`;
     });
     // Move cursor up and overwrite
     if (slots._printed) {
@@ -60,26 +66,38 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
     const host = url.hostname;
 
     slot.host = host;
-    slot.phase = 0;
+    slot.pct = 0;
+    slot.label = "";
 
-    const advance = () => { slot.phase++; printProgress(progress.slots); };
+    const setPhase = (phaseIdx, sub = 0) => {
+        const p = PHASES[phaseIdx];
+        slot.pct = p.start + (p.end - p.start) * sub;
+        slot.label = p.label;
+        printProgress(progress.slots);
+    };
 
     const page = await browser.newPage({
         viewport: { width: VIEWPORT_WIDTH, height: 800 },
         deviceScaleFactor: 1,
     });
 
+    // Expose a callback so the browser can report scroll progress back to Node
+    await page.exposeFunction("__reportScroll", (fraction) => {
+        setPhase(1, fraction);
+    });
+
     try {
         // 1) Loading page
-        advance();
+        setPhase(0, 0);
         await page.emulateMedia({ reducedMotion: "reduce" });
         await page.goto(url.toString(), {
             waitUntil: "networkidle",
             timeout: 45000,
         });
+        setPhase(0, 1);
 
         // 2) Scroll — trigger whileInView / IntersectionObserver animations
-        advance();
+        setPhase(1, 0);
         const scrollStep = 400;
         await page.evaluate(async (step) => {
             const waitForStability = () =>
@@ -98,37 +116,50 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
                     setTimeout(() => { clearInterval(id); obs.disconnect(); resolve(); }, 4000);
                 });
 
-            for (let y = 0; y < document.body.scrollHeight; y += step) {
+            const totalH = document.body.scrollHeight;
+            const steps = Math.ceil(totalH / step) + 2; // +2 for scroll-to-end and scroll-back
+            let done = 0;
+
+            for (let y = 0; y < totalH; y += step) {
                 window.scrollTo(0, y);
                 await waitForStability();
+                done++;
+                await window.__reportScroll(done / steps);
             }
-            window.scrollTo(0, document.body.scrollHeight);
+            window.scrollTo(0, totalH);
             await waitForStability();
+            done++;
+            await window.__reportScroll(done / steps);
+
             window.scrollTo(0, 0);
             await waitForStability();
+            await window.__reportScroll(1);
         }, scrollStep);
 
         // 3) Screenshot
-        advance();
+        setPhase(2, 0);
         const pngBuffer = await page.screenshot({
             type: "png",
             fullPage: true,
         });
+        setPhase(2, 1);
 
         // 4) Convert PNG -> JPEG
-        advance();
+        setPhase(3, 0);
         await sharp(pngBuffer)
             .jpeg({ quality: JPG_QUALITY, mozjpeg: true })
             .toFile(outputFile);
 
         progress.done++;
         slot.host = `✅ ${host}`;
-        slot.phase = PHASES.length;
+        slot.pct = 100;
+        slot.label = "";
         printProgress(progress.slots);
     } catch (err) {
         progress.done++;
         slot.host = `❌ ${host}`;
-        slot.phase = PHASES.length;
+        slot.pct = 100;
+        slot.label = "";
         printProgress(progress.slots);
         console.error(`   ${host}: ${err.message}`);
         process.exitCode = 1;
@@ -149,7 +180,7 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
     const workerCount = Math.min(CONCURRENCY, total);
 
     // Progress bar slots — one line per worker
-    const slots = Array.from({ length: workerCount }, () => ({ host: "…", phase: 0 }));
+    const slots = Array.from({ length: workerCount }, () => ({ host: "…", pct: 0, label: "" }));
     slots._printed = false;
     const progress = { done: 0, total, slots };
 
