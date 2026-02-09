@@ -52,44 +52,38 @@ async function takeScreenshot(browser, url, outputDir) {
             timeout: 45000,
         });
 
-        // Proscrollujeme celou stránku, aby se spustily whileInView / IntersectionObserver animace
-        await page.evaluate(async () => {
-            const delay = (ms) => new Promise((r) => setTimeout(r, ms));
-            for (let y = 0; y < document.body.scrollHeight; y += window.innerHeight) {
-                window.scrollTo(0, y);
-                await delay(100);
-            }
-            window.scrollTo(0, 0);
-        });
+        // Pomalu proscrollujeme celou stránku, aby se spustily whileInView animace
+        // Po každém kroku čekáme na ustálení DOM (Framer píše inline style každý rAF)
+        const scrollStep = 400; // menší kroky = víc prvků se triggerne
+        await page.evaluate(async (step) => {
+            const waitForStability = () =>
+                new Promise((resolve) => {
+                    let lastMut = Date.now();
+                    const obs = new MutationObserver(() => { lastMut = Date.now(); });
+                    obs.observe(document.body, {
+                        attributes: true, attributeFilter: ["style", "class"],
+                        subtree: true, childList: true,
+                    });
+                    const id = setInterval(() => {
+                        if (Date.now() - lastMut > 350) {
+                            clearInterval(id); obs.disconnect(); resolve();
+                        }
+                    }, 50);
+                    setTimeout(() => { clearInterval(id); obs.disconnect(); resolve(); }, 4000);
+                });
 
-        // Počkáme až se ustálí DOM — Framer Motion píše inline style každý rAF frame,
-        // takže sledujeme mutace atributu "style" a čekáme na 500ms klid
-        await page.evaluate(() => {
-            return new Promise((resolve) => {
-                let lastMutationTime = Date.now();
-                const observer = new MutationObserver(() => {
-                    lastMutationTime = Date.now();
-                });
-                observer.observe(document.body, {
-                    attributes: true,
-                    attributeFilter: ["style", "class"],
-                    subtree: true,
-                    childList: true,
-                });
-                const check = setInterval(() => {
-                    if (Date.now() - lastMutationTime > 500) {
-                        clearInterval(check);
-                        observer.disconnect();
-                        resolve();
-                    }
-                }, 100);
-                setTimeout(() => {
-                    clearInterval(check);
-                    observer.disconnect();
-                    resolve();
-                }, 8000);
-            });
-        });
+            for (let y = 0; y < document.body.scrollHeight; y += step) {
+                window.scrollTo(0, y);
+                await waitForStability();
+            }
+            // Scroll na úplný konec
+            window.scrollTo(0, document.body.scrollHeight);
+            await waitForStability();
+
+            // Zpět nahoru a počkat na finální ustálení
+            window.scrollTo(0, 0);
+            await waitForStability();
+        }, scrollStep);
 
         const pngBuffer = await page.screenshot({
             type: "png",
