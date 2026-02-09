@@ -16,6 +16,7 @@ const fs = require("fs/promises");
 const VIEWPORT_WIDTH = 1920;
 const JPG_QUALITY = 80;
 const OUTPUT_DIR = "screenshots"; // samostatný adresář pro výstupy
+const CONCURRENCY = 4; // max počet paralelních screenshotů
 
 function sanitizeHostToFilename(hostname) {
     // example.com -> example-com
@@ -34,9 +35,10 @@ function ensureUrl(input) {
     }
 }
 
-async function takeScreenshot(browser, url, outputDir) {
+async function takeScreenshot(browser, url, outputDir, progress) {
     const fileBase = sanitizeHostToFilename(url.hostname);
     const outputFile = path.join(outputDir, `${fileBase}.jpg`);
+    const host = url.hostname;
 
     const page = await browser.newPage({
         viewport: { width: VIEWPORT_WIDTH, height: 800 },
@@ -44,6 +46,8 @@ async function takeScreenshot(browser, url, outputDir) {
     });
 
     try {
+        console.log(`⏳ ${host} — načítám…`);
+
         // Framer Motion respektuje prefers-reduced-motion — animace přeskočí na finální stav
         await page.emulateMedia({ reducedMotion: "reduce" });
 
@@ -94,9 +98,11 @@ async function takeScreenshot(browser, url, outputDir) {
             .jpeg({ quality: JPG_QUALITY, mozjpeg: true })
             .toFile(outputFile);
 
-        console.log(`✅ Hotovo: ${outputFile}`);
+        progress.done++;
+        console.log(`✅ [${progress.done}/${progress.total}] ${host} -> ${outputFile}`);
     } catch (err) {
-        console.error(`❌ Nepodařilo se vytvořit screenshot ${url}: ${err.message}`);
+        progress.done++;
+        console.error(`❌ [${progress.done}/${progress.total}] ${host} — ${err.message}`);
         process.exitCode = 1;
     } finally {
         await page.close();
@@ -111,6 +117,10 @@ async function takeScreenshot(browser, url, outputDir) {
     }
 
     const urls = rawArgs.map(ensureUrl);
+    const total = urls.length;
+    const progress = { done: 0, total };
+
+    console.log(`🚀 Spouštím screenshot pro ${total} URL (paralelně max ${CONCURRENCY})…\n`);
 
     const outputDir = path.resolve(process.cwd(), OUTPUT_DIR);
     await fs.mkdir(outputDir, { recursive: true });
@@ -118,10 +128,18 @@ async function takeScreenshot(browser, url, outputDir) {
     const browser = await chromium.launch({ headless: true });
 
     try {
-        for (const url of urls) {
-            await takeScreenshot(browser, url, outputDir);
-        }
+        // Paralelní zpracování s omezenou concurrency
+        const queue = [...urls];
+        const workers = Array.from({ length: Math.min(CONCURRENCY, total) }, async () => {
+            while (queue.length > 0) {
+                const url = queue.shift();
+                await takeScreenshot(browser, url, outputDir, progress);
+            }
+        });
+        await Promise.all(workers);
     } finally {
         await browser.close();
     }
+
+    console.log(`\n🏁 Hotovo — ${progress.done}/${total} screenshotů.`);
 })();
