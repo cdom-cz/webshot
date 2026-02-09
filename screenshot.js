@@ -2,6 +2,7 @@
 /**
  * Usage:
  *   pnpm shot https://image21.cdom.cz/
+ *   pnpm shot https://example.com https://example.org
  *
  * Output:
  *   ./screenshots/image21-cdom-cz.jpg
@@ -12,7 +13,7 @@ const sharp = require("sharp");
 const path = require("path");
 const fs = require("fs/promises");
 
-const FIXED_VIEWPORT = { width: 1920, height: 1080 }; // pevné rozlišení
+const VIEWPORT_WIDTH = 1920;
 const JPG_QUALITY = 80;
 const OUTPUT_DIR = "screenshots"; // samostatný adresář pro výstupy
 
@@ -33,24 +34,12 @@ function ensureUrl(input) {
     }
 }
 
-(async () => {
-    const rawArg = process.argv[2];
-    if (!rawArg) {
-        console.error("Chyba: zadej URL, např. pnpm shot https://image21.cdom.cz/");
-        process.exit(1);
-    }
-
-    const url = ensureUrl(rawArg);
+async function takeScreenshot(browser, url, outputDir) {
     const fileBase = sanitizeHostToFilename(url.hostname);
-
-    const outputDir = path.resolve(process.cwd(), OUTPUT_DIR);
-    await fs.mkdir(outputDir, { recursive: true }); // vytvoří složku, pokud chybí
-
     const outputFile = path.join(outputDir, `${fileBase}.jpg`);
 
-    const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage({
-        viewport: FIXED_VIEWPORT,
+        viewport: { width: VIEWPORT_WIDTH, height: 800 },
         deviceScaleFactor: 1,
     });
 
@@ -62,7 +51,7 @@ function ensureUrl(input) {
 
         const pngBuffer = await page.screenshot({
             type: "png",
-            fullPage: false,
+            fullPage: true,
         });
 
         await sharp(pngBuffer)
@@ -71,8 +60,31 @@ function ensureUrl(input) {
 
         console.log(`✅ Hotovo: ${outputFile}`);
     } catch (err) {
-        console.error("❌ Nepodařilo se vytvořit screenshot:", err.message);
+        console.error(`❌ Nepodařilo se vytvořit screenshot ${url}: ${err.message}`);
         process.exitCode = 1;
+    } finally {
+        await page.close();
+    }
+}
+
+(async () => {
+    const rawArgs = process.argv.slice(2);
+    if (rawArgs.length === 0) {
+        console.error("Chyba: zadej URL, např. pnpm shot https://image21.cdom.cz/");
+        process.exit(1);
+    }
+
+    const urls = rawArgs.map(ensureUrl);
+
+    const outputDir = path.resolve(process.cwd(), OUTPUT_DIR);
+    await fs.mkdir(outputDir, { recursive: true });
+
+    const browser = await chromium.launch({ headless: true });
+
+    try {
+        for (const url of urls) {
+            await takeScreenshot(browser, url, outputDir);
+        }
     } finally {
         await browser.close();
     }
