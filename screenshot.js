@@ -44,18 +44,52 @@ async function takeScreenshot(browser, url, outputDir) {
     });
 
     try {
+        // Framer Motion respektuje prefers-reduced-motion — animace přeskočí na finální stav
+        await page.emulateMedia({ reducedMotion: "reduce" });
+
         await page.goto(url.toString(), {
             waitUntil: "networkidle",
             timeout: 45000,
         });
 
-        // Počkáme na dokončení JS animací (React hydration, Next.js transitions apod.)
-        await page.evaluate(() =>
-            new Promise((resolve) => {
-                requestAnimationFrame(() => requestAnimationFrame(resolve));
-            })
-        );
-        await page.waitForTimeout(2000);
+        // Proscrollujeme celou stránku, aby se spustily whileInView / IntersectionObserver animace
+        await page.evaluate(async () => {
+            const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+            for (let y = 0; y < document.body.scrollHeight; y += window.innerHeight) {
+                window.scrollTo(0, y);
+                await delay(100);
+            }
+            window.scrollTo(0, 0);
+        });
+
+        // Počkáme až se ustálí DOM — Framer Motion píše inline style každý rAF frame,
+        // takže sledujeme mutace atributu "style" a čekáme na 500ms klid
+        await page.evaluate(() => {
+            return new Promise((resolve) => {
+                let lastMutationTime = Date.now();
+                const observer = new MutationObserver(() => {
+                    lastMutationTime = Date.now();
+                });
+                observer.observe(document.body, {
+                    attributes: true,
+                    attributeFilter: ["style", "class"],
+                    subtree: true,
+                    childList: true,
+                });
+                const check = setInterval(() => {
+                    if (Date.now() - lastMutationTime > 500) {
+                        clearInterval(check);
+                        observer.disconnect();
+                        resolve();
+                    }
+                }, 100);
+                setTimeout(() => {
+                    clearInterval(check);
+                    observer.disconnect();
+                    resolve();
+                }, 8000);
+            });
+        });
 
         const pngBuffer = await page.screenshot({
             type: "png",
