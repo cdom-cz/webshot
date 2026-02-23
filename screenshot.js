@@ -133,6 +133,8 @@ async function takeScreenshot(browser, url, outputDir, progress, slot) {
 
             window.scrollTo(0, 0);
             await waitForStability();
+            // Extra settle time so fixed/sticky headers repaint correctly
+            await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 300)));
             await window.__reportScroll(1);
         }, scrollStep);
 
